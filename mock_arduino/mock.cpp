@@ -56,7 +56,10 @@ int evaluateGenome(const Genome& genome) {
     Chord c = h_state.sequence[ci];
     uint16_t mask = SCALES[c.scale_idx].mask;
     byte rel = (genome.note[i] - c.root + 12) % 12;
-    score += ((mask >> rel) & 1) ? 15 : -35;
+
+    // Increased penalty for out-of-scale notes to reach 100% adherence
+    score += ((mask >> rel) & 1) ? 20 : -100;
+
     if (rel == 0) score += 25; else if (rel == 7) score += 10;
     score += note_bias[genome.note[i]] * 5;
     if (i % 4 == 0) { if (genome.gate[i] == 1) score += 10; else score -= 15; }
@@ -130,7 +133,8 @@ int main(int argc, char** argv) {
     h_state.sequence[0] = {0, 0}; h_state.sequence[1] = {5, 0}; h_state.sequence[2] = {7, 2}; h_state.sequence[3] = {0, 0};
     initPopulation(); evaluatePopulation();
 
-    for (int i = 0; i < 500; i++) { mutatePopulation(); evaluatePopulation(); }
+    // Increased generations to ensure convergence
+    for (int i = 0; i < 1000; i++) { mutatePopulation(); evaluatePopulation(); }
 
     for (int i = 0; i < NUM_STEPS; i++) {
         if (best_genome.gate[i]) {

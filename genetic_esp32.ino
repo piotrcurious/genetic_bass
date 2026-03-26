@@ -47,12 +47,10 @@ int note_bias[NUM_NOTES] = {0}, current_step = 0;
 bool beat_on = false;
 SemaphoreHandle_t genome_mutex;
 
-// Button state
 bool last_like = HIGH, last_dislike = HIGH;
 unsigned long like_time = 0, dislike_time = 0;
 const unsigned long DEBOUNCE = 50;
 
-// Audio state
 volatile uint32_t phase = 0, phase_inc = 0, target_phase_inc = 0;
 volatile byte current_waveform = 1;
 volatile uint32_t amplitude = 0, decay_rate = 100;
@@ -89,7 +87,7 @@ void loadState() {
   f.close(); Serial.println("Loaded.");
 }
 
-// --- Audio Synthesis ---
+// --- Audio ---
 void IRAM_ATTR onTimer() {
   if (amplitude > 0) {
     if (phase_inc != target_phase_inc) {
@@ -131,7 +129,7 @@ int evaluateGenome(const Genome& genome) {
     Chord c = h_state.sequence[ci];
     uint16_t mask = SCALES[c.scale_idx].mask;
     byte rel = (genome.note[i] - c.root + 12) % 12;
-    score += ((mask >> rel) & 1) ? 15 : -35;
+    score += ((mask >> rel) & 1) ? 20 : -100;
     if (rel == 0) score += 25; else if (rel == 7) score += 10;
     score += note_bias[genome.note[i]] * 5;
     if (i % 4 == 0) { if (genome.gate[i] == 1) score += 10; else score -= 15; }
