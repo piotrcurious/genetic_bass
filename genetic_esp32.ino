@@ -1,4 +1,4 @@
-// ESP32 production-level funky house bassline generator using DAC and FreeRTOS
+// ESP32 production-level music-theory driven bass generator
 #include <Arduino.h>
 #include <driver/dac.h>
 #include <cmath>
@@ -9,8 +9,6 @@
 #define LIKE_PIN 4
 #define DISLIKE_PIN 5
 #define BPM_PIN 36
-#define LIKE_LED 18
-#define DISLIKE_LED 19
 
 const int NUM_STEPS = 64;
 const int NUM_NOTES = 12;
@@ -54,7 +52,7 @@ bool last_like = HIGH, last_dislike = HIGH;
 unsigned long like_time = 0, dislike_time = 0;
 const unsigned long DEBOUNCE = 50;
 
-// Audio state (volatile for ISR)
+// Audio state
 volatile uint32_t phase = 0, phase_inc = 0, target_phase_inc = 0;
 volatile byte current_waveform = 1;
 volatile uint32_t amplitude = 0, decay_rate = 100;
@@ -62,38 +60,36 @@ volatile int lpf_alpha = 256, lpf_prev = 128;
 int freq_lut[128];
 byte sine_lut[256];
 hw_timer_t * timer = NULL;
-
-// --- Task Handles ---
-TaskHandle_t SequencerTask;
+TaskHandle_t SequencerTaskHandle = NULL;
 
 // --- Flash Storage ---
 void saveState() {
-  File f = LittleFS.open("/v3.bin", "w");
+  File f = LittleFS.open("/v5.bin", "w");
   if (!f) return;
   xSemaphoreTake(genome_mutex, portMAX_DELAY);
   f.write((uint8_t*)&best_genome, sizeof(best_genome));
   f.write((uint8_t*)note_bias, sizeof(note_bias));
   f.write((uint8_t*)&h_state, sizeof(h_state));
+  f.write((uint8_t*)&lpf_alpha, sizeof(lpf_alpha));
   xSemaphoreGive(genome_mutex);
-  f.close();
-  Serial.println("Saved.");
+  f.close(); Serial.println("Saved.");
 }
 
 void loadState() {
-  if (!LittleFS.exists("/v3.bin")) return;
-  File f = LittleFS.open("/v3.bin", "r");
+  if (!LittleFS.exists("/v5.bin")) return;
+  File f = LittleFS.open("/v5.bin", "r");
   if (!f) return;
   xSemaphoreTake(genome_mutex, portMAX_DELAY);
   f.read((uint8_t*)&best_genome, sizeof(best_genome));
   f.read((uint8_t*)note_bias, sizeof(note_bias));
   f.read((uint8_t*)&h_state, sizeof(h_state));
+  f.read((uint8_t*)&lpf_alpha, sizeof(lpf_alpha));
   population[0] = best_genome;
   xSemaphoreGive(genome_mutex);
-  f.close();
-  Serial.println("Loaded.");
+  f.close(); Serial.println("Loaded.");
 }
 
-// --- Audio Synthesis (Timer ISR) ---
+// --- Audio Synthesis ---
 void IRAM_ATTR onTimer() {
   if (amplitude > 0) {
     if (phase_inc != target_phase_inc) {
@@ -103,18 +99,16 @@ void IRAM_ATTR onTimer() {
     }
     phase += phase_inc;
     byte idx = (phase >> 24) & 0xFF;
-    int raw_sample = 0;
+    int s = 0;
     switch(current_waveform) {
-      case 0: raw_sample = (int)sine_lut[idx] - 128; break;
-      case 1: raw_sample = (int)idx - 128; break;
-      case 2: raw_sample = (int)(idx < 128 ? idx * 2 : (255 - idx) * 2) - 128; break;
-      case 3: raw_sample = (idx < 128 ? 127 : -128); break;
+      case 0: s = (int)sine_lut[idx] - 128; break;
+      case 1: s = (int)idx - 128; break;
+      case 2: s = (int)(idx < 128 ? idx * 2 : (255 - idx) * 2) - 128; break;
+      case 3: s = (idx < 128 ? 127 : -128); break;
     }
-    uint32_t amp_val = amplitude >> 16;
-    int out_raw = 128 + ((raw_sample * (int)amp_val) >> 16);
+    int out_raw = 128 + (((s * (int)(amplitude >> 16))) >> 16);
     int out = lpf_prev + ((lpf_alpha * (out_raw - lpf_prev)) >> 8);
-    lpf_prev = out;
-    dac_output_voltage(DAC_CHANNEL_1, (byte)out);
+    lpf_prev = out; dac_output_voltage(DAC_CHANNEL_1, (byte)out);
     if (amplitude > decay_rate) amplitude -= decay_rate;
     else { amplitude = 0; phase_inc = 0; target_phase_inc = 0; }
   } else { dac_output_voltage(DAC_CHANNEL_1, 128); phase_inc = 0; target_phase_inc = 0; lpf_prev = 128; }
@@ -154,13 +148,13 @@ int evaluateGenome(const Genome& genome) {
 }
 
 void evaluatePopulation() {
-  int best_s = -999999, best_i = 0;
+  int best_s = -999999, best_idx = 0;
   for (int i = 0; i < POP_SIZE; i++) {
     int s = evaluateGenome(population[i]);
-    if (s > best_s) { best_s = s; best_i = i; }
+    if (s > best_s) { best_s = s; best_idx = i; }
   }
   xSemaphoreTake(genome_mutex, portMAX_DELAY);
-  best_genome = population[best_i];
+  best_genome = population[best_idx];
   xSemaphoreGive(genome_mutex);
 }
 
@@ -193,8 +187,7 @@ void mutatePopulation(float rate = 0.05) {
       next_gen[i].slide[j] = from_p1 ? p1.slide[j] : p2.slide[j];
       if ((float)random(100)/100.0 < rate) {
         next_gen[i].note[j] = random(NUM_NOTES); next_gen[i].octave[j] = random(3);
-        next_gen[i].waveform[j] = random(4);
-        next_gen[i].gate[j] = (random(100) < (h_state.groove_density * 100)) ? 1 : 0;
+        next_gen[i].waveform[j] = random(4); next_gen[i].gate[j] = (random(100) < (h_state.groove_density * 100)) ? 1 : 0;
         next_gen[i].tie[j] = (random(100) < 15) ? 1 : 0; next_gen[i].slide[j] = (random(100) < 10) ? 1 : 0;
       }
     }
@@ -202,32 +195,27 @@ void mutatePopulation(float rate = 0.05) {
   for(int i=0; i<POP_SIZE; i++) population[i] = next_gen[i];
 }
 
-// --- Sequencer Task ---
+// --- Sequencer ---
 void sequencerTask(void * pvParameters) {
   while(1) {
     int bpm = analogRead(BPM_PIN) / 16 + 60;
     int base_step_time = 60000 / bpm / 4;
     int current_wait = (current_step % 2 == 1) ? (int)(base_step_time * (1.0 + h_state.swing)) : (int)(base_step_time * (1.0 - h_state.swing));
-
     xSemaphoreTake(genome_mutex, portMAX_DELAY);
-    byte note = best_genome.note[current_step], octave = best_genome.octave[current_step];
-    byte gate = best_genome.gate[current_step], waveform = best_genome.waveform[current_step];
+    byte note = best_genome.note[current_step], octave = best_genome.octave[current_step], gate = best_genome.gate[current_step], waveform = best_genome.waveform[current_step];
     byte tie = best_genome.tie[current_step], slide = best_genome.slide[current_step];
-    int prev_idx = (current_step == 0) ? NUM_STEPS - 1 : current_step - 1;
-    byte prev_note = best_genome.note[prev_idx], prev_octave = best_genome.octave[prev_idx], prev_tie = best_genome.tie[prev_idx], prev_slide = best_genome.slide[prev_idx];
+    int p_idx = (current_step == 0) ? NUM_STEPS - 1 : current_step - 1;
+    byte pn = best_genome.note[p_idx], po = best_genome.octave[p_idx], pt = best_genome.tie[p_idx], ps = best_genome.slide[p_idx];
     xSemaphoreGive(genome_mutex);
-
     int freq = freq_lut[note + octave * 12 + 24];
     uint32_t p_inc = (uint32_t)(((double)freq / SAMPLE_RATE) * 4294967296.0);
     if (gate == 1) {
-      bool is_tie = (prev_tie == 1 && note == prev_note && octave == prev_octave), is_slide = (prev_slide == 1);
+      bool is_t = (pt == 1 && note == pn && octave == po), is_s = (ps == 1);
       current_waveform = waveform; target_phase_inc = p_inc;
-      if (!is_slide) phase_inc = p_inc;
-      if (!is_tie && !is_slide) amplitude = 0xFFFFFFFF;
-      Serial.print(is_tie ? "T" : (is_slide ? "S" : "")); Serial.print(freq);
+      if (!is_s) phase_inc = p_inc; if (!is_t && !is_s) amplitude = 0xFFFFFFFF;
+      Serial.print(is_t ? "T" : (is_s ? "S" : "")); Serial.print(freq);
     } else { Serial.print(0); target_phase_inc = 0; }
     Serial.print(current_step == NUM_STEPS - 1 ? "\n" : " ");
-
     current_step = (current_step + 1) % NUM_STEPS;
     beat_on = !beat_on; digitalWrite(BEAT_PIN, beat_on ? HIGH : LOW);
     decay_rate = 0xFFFFFFFF / (SAMPLE_RATE * (base_step_time * 1.5) / 1000);
@@ -235,6 +223,7 @@ void sequencerTask(void * pvParameters) {
   }
 }
 
+// --- CLI ---
 void processSerial() {
   if (Serial.available() > 0) {
     String cmd = Serial.readStringUntil('\n'); cmd.trim();
@@ -244,6 +233,23 @@ void processSerial() {
     else if (cmd == "list") { for(int i=0; i<11; i++) { Serial.print(i); Serial.print(": "); Serial.println(SCALES[i].name); } }
     else if (cmd.startsWith("filter ")) lpf_alpha = cmd.substring(7).toInt();
     else if (cmd.startsWith("swing ")) h_state.swing = cmd.substring(6).toFloat();
+    else if (cmd.startsWith("seq ")) {
+       char buffer[64]; cmd.toCharArray(buffer, 64);
+       char* ptr = strtok(buffer + 4, " ");
+       if (ptr) {
+         int len = atoi(ptr);
+         if (len > 0 && len <= 8) {
+           h_state.sequence_len = len;
+           for (int i = 0; i < len; i++) {
+             ptr = strtok(NULL, " "); if (!ptr) break;
+             h_state.sequence[i].root = atoi(ptr) % 12;
+             ptr = strtok(NULL, " "); if (!ptr) break;
+             h_state.sequence[i].scale_idx = atoi(ptr) % 11;
+           }
+           Serial.println("Seq Updated."); evaluatePopulation();
+         }
+       }
+    }
     else if (cmd == "help") Serial.println("save, load, reset, list, filter [0-256], swing [0-1], seq [len] [root scale]*");
     else Serial.println("Unknown. Try 'help'.");
   }
@@ -252,29 +258,24 @@ void processSerial() {
 void setup() {
   Serial.begin(115200); LittleFS.begin(true);
   pinMode(BEAT_PIN, OUTPUT); pinMode(LIKE_PIN, INPUT_PULLUP); pinMode(DISLIKE_PIN, INPUT_PULLUP); pinMode(BPM_PIN, INPUT);
-  pinMode(LIKE_LED, OUTPUT); pinMode(DISLIKE_LED, OUTPUT);
   genome_mutex = xSemaphoreCreateMutex();
   h_state.sequence[0] = {0, 0}; h_state.sequence[1] = {5, 0}; h_state.sequence[2] = {7, 2}; h_state.sequence[3] = {0, 0};
   initAudio(); initPopulation(); loadState(); evaluatePopulation();
-  xTaskCreatePinnedToCore(sequencerTask, "Sequencer", 4096, NULL, 5, &SequencerTask, 1);
+  xTaskCreatePinnedToCore(sequencerTask, "Sequencer", 4096, NULL, 5, &SequencerTaskHandle, 1);
 }
 
 void loop() {
   processSerial();
   bool like = digitalRead(LIKE_PIN), dislike = digitalRead(DISLIKE_PIN);
   if (like == LOW && last_like == HIGH && (millis() - like_time > DEBOUNCE)) {
-    digitalWrite(LIKE_LED, HIGH);
     xSemaphoreTake(genome_mutex, portMAX_DELAY);
     for(int i=0; i<NUM_STEPS; i++) if (best_genome.gate[i]) note_bias[best_genome.note[i]]++;
     xSemaphoreGive(genome_mutex);
     for(int g=0; g<10; g++) mutatePopulation(0.15); evaluatePopulation();
     like_time = millis(); Serial.println("\nLiked");
-    digitalWrite(LIKE_LED, LOW);
   } else if (dislike == LOW && last_dislike == HIGH && (millis() - dislike_time > DEBOUNCE)) {
-    digitalWrite(DISLIKE_LED, HIGH);
     initPopulation(); for(int i=0; i<NUM_NOTES; i++) note_bias[i] = 0; evaluatePopulation();
     dislike_time = millis(); Serial.println("\nDisliked");
-    digitalWrite(DISLIKE_LED, LOW);
   }
   last_like = like; last_dislike = dislike;
   vTaskDelay(10);

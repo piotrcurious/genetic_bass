@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <string>
+#include <cstring>
 
 typedef unsigned char byte;
 
@@ -72,12 +73,12 @@ int evaluateGenome(const Genome& genome) {
 }
 
 void evaluatePopulation() {
-  int best_s = -999999, best_i = 0;
+  int best_s = -999999, best_idx = 0;
   for (int i = 0; i < POP_SIZE; i++) {
     int s = evaluateGenome(population[i]);
-    if (s > best_s) { best_s = s; best_i = i; }
+    if (s > best_s) { best_s = s; best_idx = i; }
   }
-  best_genome = population[best_i];
+  best_genome = population[best_idx];
 }
 
 void initPopulation() {
@@ -93,28 +94,28 @@ void initPopulation() {
   }
 }
 
-int selectParent() {
-  int i1 = rand() % POP_SIZE, i2 = rand() % POP_SIZE;
-  return (evaluateGenome(population[i1]) > evaluateGenome(population[i2])) ? i1 : i2;
-}
-
 void mutatePopulation(float rate = 0.05) {
   next_gen[0] = best_genome;
   for (int i = 1; i < POP_SIZE; i++) {
-    Genome &p1 = population[selectParent()], &p2 = population[selectParent()];
+    int i1 = rand() % POP_SIZE, i2 = rand() % POP_SIZE;
+    Genome &p1 = (evaluateGenome(population[i1]) > evaluateGenome(population[i2])) ? population[i1] : population[i2];
+    int i3 = rand() % POP_SIZE, i4 = rand() % POP_SIZE;
+    Genome &p2 = (evaluateGenome(population[i3]) > evaluateGenome(population[i4])) ? population[i3] : population[i4];
+
     int cp1 = rand() % NUM_STEPS, cp2 = rand() % NUM_STEPS;
     if (cp1 > cp2) std::swap(cp1, cp2);
     for(int j=0; j<NUM_STEPS; j++) {
       bool from_p1 = (j < cp1 || j > cp2);
       next_gen[i].note[j] = from_p1 ? p1.note[j] : p2.note[j];
       next_gen[i].octave[j] = from_p1 ? p1.octave[j] : p2.octave[j];
+      next_gen[i].waveform[j] = from_p1 ? p1.waveform[j] : p2.waveform[j];
       next_gen[i].gate[j] = from_p1 ? p1.gate[j] : p2.gate[j];
       next_gen[i].tie[j] = from_p1 ? p1.tie[j] : p2.tie[j];
       next_gen[i].slide[j] = from_p1 ? p1.slide[j] : p2.slide[j];
-      next_gen[i].waveform[j] = p1.waveform[j];
       if ((float)rand()/RAND_MAX < rate) {
         next_gen[i].note[j] = rand() % NUM_NOTES;
         next_gen[i].octave[j] = rand() % 3;
+        next_gen[i].waveform[j] = rand() % 4;
         next_gen[i].gate[j] = (rand() % 100 < (h_state.groove_density * 100)) ? 1 : 0;
         next_gen[i].tie[j] = (rand() % 100 < 15) ? 1 : 0;
         next_gen[i].slide[j] = (rand() % 100 < 10) ? 1 : 0;
@@ -128,7 +129,9 @@ int main(int argc, char** argv) {
     srand(time(NULL)); initFreqLUT();
     h_state.sequence[0] = {0, 0}; h_state.sequence[1] = {5, 0}; h_state.sequence[2] = {7, 2}; h_state.sequence[3] = {0, 0};
     initPopulation(); evaluatePopulation();
-    for (int it = 0; it < 300; it++) { mutatePopulation(); evaluatePopulation(); }
+
+    for (int i = 0; i < 500; i++) { mutatePopulation(); evaluatePopulation(); }
+
     for (int i = 0; i < NUM_STEPS; i++) {
         if (best_genome.gate[i]) {
             int midi = best_genome.note[i] + best_genome.octave[i] * 12 + 24;
