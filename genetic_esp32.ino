@@ -22,6 +22,7 @@ struct Genome {
   byte octave[NUM_STEPS];
   byte waveform[NUM_STEPS];
   byte gate[NUM_STEPS];
+  byte tie[NUM_STEPS];
 };
 
 const int JAZZ_TABLE[7][12] = {
@@ -34,8 +35,13 @@ const int JAZZ_TABLE[7][12] = {
     {10, -5, -5, -5, -5, 10, 8, 10, -5, -5, -5, 8}
 };
 
-const byte CHORD_PROGRESSION[4][2] = {
-  {0,0}, {1,9}, {2,7}, {1,2}
+enum Progression { HOUSE, BLUES, JAZZ_II_V_I };
+Progression current_prog = HOUSE;
+
+const byte PROGRESSIONS[3][4][2] = {
+  {{0,0}, {1,9}, {2,7}, {1,2}}, // House: Cmaj, Am, G7, Dm
+  {{2,0}, {2,5}, {2,0}, {2,7}}, // Blues: C7, F7, C7, G7
+  {{1,2}, {2,7}, {0,0}, {0,0}}  // Jazz II-V-I: Dm, G7, Cmaj, Cmaj
 };
 
 int freq_lut[128];
@@ -47,6 +53,7 @@ void initLUTs() {
 }
 
 Genome population[POP_SIZE];
+Genome next_gen[POP_SIZE];
 Genome best_genome;
 int current_step = 0;
 int current_bpm;
@@ -61,8 +68,8 @@ int octave_bias[3] = {0};
 volatile uint32_t phase = 0;
 volatile uint32_t phase_inc = 0;
 volatile byte current_waveform = 1;
-volatile uint16_t amplitude = 0; // 0-255 (fixed point 8.8)
-volatile uint16_t decay_rate = 50; // amount to subtract per sample
+volatile uint32_t amplitude = 0; // 0-2^32 (fixed point 16.16)
+volatile uint32_t decay_rate = 100;
 
 hw_timer_t * timer = NULL;
 const int SAMPLE_RATE = 20000;
@@ -78,16 +85,14 @@ void IRAM_ATTR onTimer() {
       case 2: raw_sample = (int)(idx < 128 ? idx * 2 : (255 - idx) * 2) - 128; break;
       case 3: raw_sample = (idx < 128 ? 127 : -128); break;
     }
-    // Corrected fixed-point scaling: (raw_sample * amp_val) >> 8
-    int amp_val = amplitude >> 8;
-    int out = 128 + ((raw_sample * amp_val) >> 8);
+    // Corrected fixed-point scaling: (raw_sample * amp_val) >> 16
+    // amp_val is amplitude >> 16, which is 0-65535
+    uint32_t amp_val = amplitude >> 16;
+    int out = 128 + ((raw_sample * (int)amp_val) >> 16);
     dac_output_voltage(DAC_CHANNEL_1, (byte)out);
 
     if (amplitude > decay_rate) amplitude -= decay_rate;
-    else {
-      amplitude = 0;
-      phase_inc = 0;
-    }
+    else { amplitude = 0; phase_inc = 0; }
   } else {
     dac_output_voltage(DAC_CHANNEL_1, 128);
     phase_inc = 0;
@@ -105,8 +110,8 @@ int evaluateGenome(const Genome& genome) {
   for (int i = 0; i < NUM_STEPS; i++) {
     byte note = genome.note[i];
     byte octave = genome.octave[i];
-    byte chord_type = CHORD_PROGRESSION[i / (NUM_STEPS / 4)][0];
-    byte chord_root = CHORD_PROGRESSION[i / (NUM_STEPS / 4)][1];
+    byte chord_type = PROGRESSIONS[current_prog][i / (NUM_STEPS / 4)][0];
+    byte chord_root = PROGRESSIONS[current_prog][i / (NUM_STEPS / 4)][1];
     byte scale_degree = (note - chord_root + NUM_NOTES) % NUM_NOTES;
     score += JAZZ_TABLE[chord_type][scale_degree];
     score -= abs(octave - 1) * 10;
@@ -119,6 +124,9 @@ int evaluateGenome(const Genome& genome) {
     if (i > 0) {
       int interval = (note + octave * 12) - (genome.note[i-1] + genome.octave[i-1] * 12);
       score -= abs(interval) * 3;
+      if (interval == 0 && genome.gate[i] == 1 && genome.gate[i-1] == 1 && genome.tie[i-1] == 0) score -= 15;
+      if (genome.tie[i-1] == 1 && (genome.gate[i] == 0 || interval != 0)) score -= 20;
+      if (genome.tie[i-1] == 1 && interval == 0 && genome.gate[i] == 1) score += 10;
     }
   }
   return score;
@@ -129,10 +137,7 @@ void evaluatePopulation() {
   int current_best_idx = 0;
   for (int i = 0; i < POP_SIZE; i++) {
     int score = evaluateGenome(population[i]);
-    if (score > best_score) {
-      best_score = score;
-      current_best_idx = i;
-    }
+    if (score > best_score) { best_score = score; current_best_idx = i; }
   }
   best_genome = population[current_best_idx];
 }
@@ -144,12 +149,10 @@ void initPopulation() {
       population[i].octave[j] = random(3);
       population[i].waveform[j] = random(4);
       population[i].gate[j] = (random(10) < 7) ? 1 : 0;
+      population[i].tie[j] = (random(10) < 2) ? 1 : 0;
     }
   }
 }
-
-// next_gen declared globally (on heap/data segment) to avoid stack overflow
-Genome next_gen[POP_SIZE];
 
 void mutatePopulation() {
   next_gen[0] = best_genome;
@@ -160,10 +163,12 @@ void mutatePopulation() {
       child.note[j] = (random(100) < 50) ? best_genome.note[j] : parent2.note[j];
       child.octave[j] = (random(100) < 50) ? best_genome.octave[j] : parent2.octave[j];
       child.gate[j] = (random(100) < 50) ? best_genome.gate[j] : parent2.gate[j];
+      child.tie[j] = (random(100) < 50) ? best_genome.tie[j] : parent2.tie[j];
       child.waveform[j] = best_genome.waveform[j];
       if ((float)random(100)/100.0 < MUT_RATE) child.note[j] = random(NUM_NOTES);
       if ((float)random(100)/100.0 < MUT_RATE) child.octave[j] = random(3);
       if ((float)random(100)/100.0 < MUT_RATE) child.gate[j] = (random(10) < 7) ? 1 : 0;
+      if ((float)random(100)/100.0 < MUT_RATE) child.tie[j] = (random(10) < 2) ? 1 : 0;
     }
     next_gen[i] = child;
   }
@@ -185,12 +190,17 @@ void playStep() {
   byte gate = best_genome.gate[current_step];
   byte waveform = best_genome.waveform[current_step];
   int freq = mtof(note, octave);
+
   if (gate == 1) {
+    bool is_tie = false;
+    if (current_step > 0 && best_genome.tie[current_step-1] == 1 && best_genome.note[current_step] == best_genome.note[current_step-1] && best_genome.octave[current_step] == best_genome.octave[current_step-1]) {
+      is_tie = true;
+    }
     current_waveform = waveform;
     phase_inc = (uint32_t)(((double)freq / SAMPLE_RATE) * 4294967296.0);
-    amplitude = 65535; // Max amplitude (255.255)
-  }
-  Serial.print(gate ? freq : 0);
+    if (!is_tie) amplitude = 0xFFFFFFFF;
+    Serial.print(is_tie ? "T" : ""); Serial.print(freq);
+  } else { Serial.print(0); }
   Serial.print(current_step == NUM_STEPS - 1 ? "\n" : " ");
 }
 
@@ -200,8 +210,9 @@ void setup() {
   pinMode(BEAT_PIN, OUTPUT);
   pinMode(LIKE_PIN, INPUT_PULLUP);
   pinMode(DISLIKE_PIN, INPUT_PULLUP);
-  dac_enable_voltage_output(DAC_CHANNEL_1);
+  pinMode(BPM_PIN, INPUT); // Correct configuration for analog input
 
+  dac_enable_voltage_output(DAC_CHANNEL_1);
   timer = timerBegin(0, 80, true);
   timerAttachInterrupt(timer, &onTimer, true);
   timerAlarmWrite(timer, 1000000 / SAMPLE_RATE, true);
@@ -222,10 +233,14 @@ void loop() {
     current_step++;
     if (current_step == NUM_STEPS) {
       current_step = 0;
-      if (digitalRead(LIKE_PIN) == LOW) {
-        updateBias();
-        mutatePopulation();
+      if (digitalRead(LIKE_PIN) == LOW && digitalRead(DISLIKE_PIN) == LOW) {
+        current_prog = (Progression)((current_prog + 1) % 3);
+        initPopulation();
         evaluatePopulation();
+        Serial.print("Prog: "); Serial.println(current_prog);
+        delay(500);
+      } else if (digitalRead(LIKE_PIN) == LOW) {
+        updateBias(); mutatePopulation(); evaluatePopulation();
       } else if (digitalRead(DISLIKE_PIN) == LOW) {
         initPopulation();
         for(int i=0; i<NUM_NOTES; i++) note_bias[i] = 0;
@@ -233,10 +248,9 @@ void loop() {
         evaluatePopulation();
       }
     }
-    beat_on = !beat_on;
-    digitalWrite(BEAT_PIN, beat_on ? HIGH : LOW);
+    beat_on = !beat_on; digitalWrite(BEAT_PIN, beat_on ? HIGH : LOW);
     current_bpm = analogRead(BPM_PIN) / 16 + 60;
     step_time = 60000 / current_bpm / 4;
-    decay_rate = 65535 / (SAMPLE_RATE * step_time / 1000);
+    decay_rate = 0xFFFFFFFF / (SAMPLE_RATE * (step_time * 1.5) / 1000);
   }
 }
