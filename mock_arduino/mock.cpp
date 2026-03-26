@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <ctime>
 #include <cstdlib>
+#include <fstream>
+#include <string>
 
 typedef unsigned char byte;
 
@@ -53,6 +55,27 @@ Genome best_genome;
 int best_score;
 int note_bias[NUM_NOTES] = {0};
 int octave_bias[3] = {0};
+
+void saveState(const std::string& filename) {
+    std::ofstream f(filename, std::ios::binary);
+    if (!f) return;
+    f.write((char*)&best_genome, sizeof(best_genome));
+    f.write((char*)note_bias, sizeof(note_bias));
+    f.write((char*)octave_bias, sizeof(octave_bias));
+    f.write((char*)&current_prog, sizeof(current_prog));
+    f.close();
+}
+
+void loadState(const std::string& filename) {
+    std::ifstream f(filename, std::ios::binary);
+    if (!f) return;
+    f.read((char*)&best_genome, sizeof(best_genome));
+    f.read((char*)note_bias, sizeof(note_bias));
+    f.read((char*)octave_bias, sizeof(octave_bias));
+    f.read((char*)&current_prog, sizeof(current_prog));
+    f.close();
+    population[0] = best_genome;
+}
 
 int mtof(byte note, byte octave) {
     int midi = note + octave * 12 + 24;
@@ -136,17 +159,22 @@ void updateBias() {
 int main(int argc, char** argv) {
     srand(time(NULL));
     initFreqLUT();
-    int iters = 100, prog_idx = 0, likes = 0;
-    if (argc > 1) iters = atoi(argv[1]);
-    if (argc > 2) prog_idx = atoi(argv[2]);
-    if (argc > 3) likes = atoi(argv[3]);
-    current_prog = (Progression)(prog_idx % 7);
+    std::string filename = "mock_state.bin";
+
+    // Command parsing (save, load, reset, prog [0-6], like [n], iters [n])
     initPopulation();
     evaluatePopulation();
-    for (int l = 0; l <= likes; l++) {
-        for (int it = 0; it < iters; it++) { mutatePopulation(); evaluatePopulation(); }
-        if (l < likes) updateBias();
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "save") saveState(filename);
+        else if (arg == "load") { loadState(filename); evaluatePopulation(); }
+        else if (arg == "reset") { initPopulation(); for(int b=0; b<NUM_NOTES; b++) note_bias[b]=0; for(int b=0; b<3; b++) octave_bias[b]=0; evaluatePopulation(); }
+        else if (arg == "prog") { if (i+1 < argc) current_prog = (Progression)(atoi(argv[++i]) % 7); initPopulation(); evaluatePopulation(); }
+        else if (arg == "like") { if (i+1 < argc) { int lcount = atoi(argv[++i]); for(int l=0; l<lcount; l++) { updateBias(); mutatePopulation(0.15); evaluatePopulation(); } } }
+        else if (arg == "iters") { if (i+1 < argc) { int icount = atoi(argv[++i]); for(int it=0; it<icount; it++) { mutatePopulation(); evaluatePopulation(); } } }
     }
+
     for (int i = 0; i < NUM_STEPS; i++) {
         if (best_genome.gate[i]) {
             int f = mtof(best_genome.note[i], best_genome.octave[i]);

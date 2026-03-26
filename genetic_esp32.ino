@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include <driver/dac.h>
 #include <cmath>
-#include <Preferences.h>
+#include <LittleFS.h>
 
 // --- Configuration & Constants ---
 #define BEAT_PIN 2
@@ -13,6 +13,7 @@
 const int NUM_STEPS = 64;
 const int NUM_NOTES = 12;
 const int POP_SIZE = 100;
+const float MUT_RATE = 0.05;
 const int SAMPLE_RATE = 20000;
 
 struct Genome {
@@ -56,7 +57,6 @@ int current_step = 0;
 unsigned long step_time;
 unsigned long last_time;
 bool beat_on = false;
-Preferences prefs;
 
 // Button state
 bool last_like = HIGH;
@@ -75,26 +75,29 @@ int freq_lut[128];
 byte sine_lut[256];
 hw_timer_t * timer = NULL;
 
-// --- Persistence ---
+// --- Flash Storage (LittleFS) ---
 void saveState() {
-  prefs.begin("bassgen", false);
-  prefs.putBytes("best", &best_genome, sizeof(best_genome));
-  prefs.putBytes("note_bias", note_bias, sizeof(note_bias));
-  prefs.putBytes("oct_bias", octave_bias, sizeof(octave_bias));
-  prefs.putInt("prog", (int)current_prog);
-  prefs.end();
+  File f = LittleFS.open("/state.bin", "w");
+  if (!f) { Serial.println("Failed to open file for writing"); return; }
+  f.write((uint8_t*)&best_genome, sizeof(best_genome));
+  f.write((uint8_t*)note_bias, sizeof(note_bias));
+  f.write((uint8_t*)octave_bias, sizeof(octave_bias));
+  f.write((uint8_t*)&current_prog, sizeof(current_prog));
+  f.close();
+  Serial.println("State saved to Flash.");
 }
 
 void loadState() {
-  prefs.begin("bassgen", true);
-  if (prefs.isKey("best")) {
-    prefs.getBytes("best", &best_genome, sizeof(best_genome));
-    prefs.getBytes("note_bias", note_bias, sizeof(note_bias));
-    prefs.getBytes("oct_bias", octave_bias, sizeof(octave_bias));
-    current_prog = (Progression)prefs.getInt("prog", (int)HOUSE);
-    population[0] = best_genome;
-  }
-  prefs.end();
+  if (!LittleFS.exists("/state.bin")) { Serial.println("No saved state found."); return; }
+  File f = LittleFS.open("/state.bin", "r");
+  if (!f) { Serial.println("Failed to open file for reading"); return; }
+  f.read((uint8_t*)&best_genome, sizeof(best_genome));
+  f.read((uint8_t*)note_bias, sizeof(note_bias));
+  f.read((uint8_t*)octave_bias, sizeof(octave_bias));
+  f.read((uint8_t*)&current_prog, sizeof(current_prog));
+  f.close();
+  population[0] = best_genome;
+  Serial.println("State loaded from Flash.");
 }
 
 // --- Audio Synthesis ---
@@ -176,16 +179,12 @@ void initPopulation() {
 }
 
 void mutatePopulation(float adaptive_mut_rate = 0.05) {
-  next_gen[0] = best_genome; // Elitism
+  next_gen[0] = best_genome;
   for (int i = 1; i < POP_SIZE; i++) {
     Genome parent1 = best_genome;
     Genome parent2 = population[random(POP_SIZE)];
-
-    // Two-point crossover
-    int p1 = random(NUM_STEPS);
-    int p2 = random(NUM_STEPS);
+    int p1 = random(NUM_STEPS), p2 = random(NUM_STEPS);
     if (p1 > p2) { int tmp = p1; p1 = p2; p2 = tmp; }
-
     for(int j=0; j<NUM_STEPS; j++) {
       bool from_p1 = (j < p1 || j > p2);
       next_gen[i].note[j] = from_p1 ? parent1.note[j] : parent2.note[j];
@@ -193,8 +192,6 @@ void mutatePopulation(float adaptive_mut_rate = 0.05) {
       next_gen[i].gate[j] = from_p1 ? parent1.gate[j] : parent2.gate[j];
       next_gen[i].tie[j] = from_p1 ? parent1.tie[j] : parent2.tie[j];
       next_gen[i].waveform[j] = parent1.waveform[j];
-
-      // Mutation
       if ((float)random(100)/100.0 < adaptive_mut_rate) {
         next_gen[i].note[j] = random(NUM_NOTES);
         next_gen[i].octave[j] = random(3);
@@ -206,6 +203,19 @@ void mutatePopulation(float adaptive_mut_rate = 0.05) {
   for(int i=0; i<POP_SIZE; i++) population[i] = next_gen[i];
 }
 
+// --- Commands ---
+void processSerial() {
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd == "save") saveState();
+    else if (cmd == "load") { loadState(); evaluatePopulation(); }
+    else if (cmd == "reset") { initPopulation(); for(int i=0; i<NUM_NOTES; i++) note_bias[i]=0; for(int i=0; i<3; i++) octave_bias[i]=0; evaluatePopulation(); Serial.println("Reset."); }
+    else if (cmd.startsWith("prog ")) { int p = cmd.substring(5).toInt(); current_prog = (Progression)(p % 7); initPopulation(); evaluatePopulation(); Serial.print("Prog Switch: "); Serial.println(current_prog); }
+    else Serial.println("Commands: save, load, reset, prog [0-6]");
+  }
+}
+
 // --- Sequencer & UI ---
 void playStep() {
   byte note = best_genome.note[current_step];
@@ -213,7 +223,8 @@ void playStep() {
   int freq = freq_lut[note + octave * 12 + 24];
   if (best_genome.gate[current_step] == 1) {
     bool is_tie = false;
-    if (current_step > 0 && best_genome.tie[current_step-1] == 1 && best_genome.note[current_step] == best_genome.note[current_step-1] && best_genome.octave[current_step] == best_genome.octave[current_step-1]) is_tie = true;
+    int prev_step = (current_step == 0) ? NUM_STEPS - 1 : current_step - 1;
+    if (best_genome.tie[prev_step] == 1 && best_genome.note[current_step] == best_genome.note[prev_step] && best_genome.octave[current_step] == best_genome.octave[prev_step]) is_tie = true;
     current_waveform = best_genome.waveform[current_step];
     phase_inc = (uint32_t)(((double)freq / SAMPLE_RATE) * 4294967296.0);
     if (!is_tie) amplitude = 0xFFFFFFFF;
@@ -225,37 +236,23 @@ void playStep() {
 void updateUI() {
   bool like = digitalRead(LIKE_PIN);
   bool dislike = digitalRead(DISLIKE_PIN);
-
   if (like == LOW && dislike == LOW) {
     current_prog = (Progression)((current_prog + 1) % 7);
     initPopulation(); evaluatePopulation();
-    saveState();
-    Serial.print("\nProgression Switched to: ");
-    switch(current_prog) {
-      case HOUSE: Serial.println("HOUSE"); break;
-      case BLUES: Serial.println("BLUES"); break;
-      case JAZZ_II_V_I: Serial.println("JAZZ II-V-I"); break;
-      case FUNK: Serial.println("FUNK"); break;
-      case POP: Serial.println("POP"); break;
-      case MINOR_BLUES: Serial.println("MINOR BLUES"); break;
-      case ROCK: Serial.println("ROCK"); break;
-    }
+    Serial.print("\nProg Switch: "); Serial.println(current_prog);
     delay(500);
   } else if (like == LOW && last_like == HIGH && (millis() - like_time > DEBOUNCE)) {
     for(int i=0; i<NUM_STEPS; i++) if (best_genome.gate[i]) { note_bias[best_genome.note[i]]++; octave_bias[best_genome.octave[i]]++; }
-    // Evolution with high mutation to explore new sounds
     for(int g=0; g<10; g++) mutatePopulation(0.15);
     evaluatePopulation();
-    saveState();
-    Serial.println("\nLiked! (Genetic evolution triggered)");
+    Serial.println("\nLiked (Not auto-saved)");
     like_time = millis();
   } else if (dislike == LOW && last_dislike == HIGH && (millis() - dislike_time > DEBOUNCE)) {
     initPopulation();
     for(int i=0; i<NUM_NOTES; i++) note_bias[i] = 0;
     for(int i=0; i<3; i++) octave_bias[i] = 0;
     evaluatePopulation();
-    saveState();
-    Serial.println("\nDisliked. Resetting learned biases.");
+    Serial.println("\nDisliked");
     dislike_time = millis();
   }
   last_like = like; last_dislike = dislike;
@@ -263,6 +260,7 @@ void updateUI() {
 
 void setup() {
   Serial.begin(115200);
+  if (!LittleFS.begin(true)) { Serial.println("LittleFS Mount Failed"); }
   pinMode(BEAT_PIN, OUTPUT);
   pinMode(LIKE_PIN, INPUT_PULLUP);
   pinMode(DISLIKE_PIN, INPUT_PULLUP);
@@ -275,6 +273,7 @@ void setup() {
 }
 
 void loop() {
+  processSerial();
   int bpm = analogRead(BPM_PIN) / 16 + 60;
   step_time = 60000 / bpm / 4;
   unsigned long current_time = millis();

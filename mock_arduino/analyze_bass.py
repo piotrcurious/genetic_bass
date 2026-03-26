@@ -19,18 +19,16 @@ def freq_to_midi(f_str):
     import math
     return round(12 * math.log2(f_val / 440.0) + 69), is_tie
 
-def run_mock(iterations=100, progression=0, likes=0):
-    result = subprocess.run(['./mock_arduino/mock', str(iterations), str(progression), str(likes)], capture_output=True, text=True)
+def run_mock(commands):
+    result = subprocess.run(['./mock_arduino/mock'] + commands, capture_output=True, text=True)
     if result.returncode != 0: return None
     return result.stdout.strip().split()
 
 def get_musicality_score(freq_strs, progression_idx):
     midis = []
-    ties = []
     for f in freq_strs:
-        m, t = freq_to_midi(f)
+        m, _ = freq_to_midi(f)
         midis.append(m)
-        ties.append(t)
     num_steps = len(midis)
     chord_tones = 0
     total_played = 0
@@ -41,14 +39,21 @@ def get_musicality_score(freq_strs, progression_idx):
             chord_idx = i // (num_steps // 4)
             if note in PROGRESSIONS[progression_idx][chord_idx]:
                 chord_tones += 1
-    accuracy = chord_tones/total_played if total_played > 0 else 0
-    return accuracy
+    return chord_tones/total_played if total_played > 0 else 0
 
 if __name__ == "__main__":
-    print(f"{'Prog':<5} | {'Likes':<6} | {'Accuracy'}")
-    print("-" * 30)
-    for p in range(7):
-        freqs = run_mock(200, p, 2)
-        if freqs:
-            acc = get_musicality_score(freqs, p)
-            print(f"{p:<5} | {2:<6} | {acc:.2%}")
+    print("Testing command sequence: reset -> iters 100 -> save -> load -> iters 100")
+    # Reset and run 100 generations
+    freqs1 = run_mock(["reset", "iters", "100", "save"])
+    acc1 = get_musicality_score(freqs1, 0)
+    print(f"Initial Acc: {acc1:.2%}")
+
+    # Load and run another 100 generations
+    freqs2 = run_mock(["load", "iters", "100"])
+    acc2 = get_musicality_score(freqs2, 0)
+    print(f"Post-load Acc: {acc2:.2%}")
+
+    # Switch progression and reset
+    freqs3 = run_mock(["prog", "3", "iters", "200"])
+    acc3 = get_musicality_score(freqs3, 3)
+    print(f"Prog 3 Acc: {acc3:.2%}")
