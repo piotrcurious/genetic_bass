@@ -3,15 +3,13 @@ import sys
 
 # Scale degrees for the progression chords
 PROGRESSIONS = [
-    [ # House
-        [0, 2, 4, 5, 7, 9, 11], [9, 11, 0, 2, 4, 5, 7], [7, 9, 11, 0, 2, 4, 5], [2, 4, 5, 7, 9, 10, 0]
-    ],
-    [ # Blues (C7, F7, C7, G7)
-        [0, 2, 4, 5, 7, 9, 10], [5, 7, 9, 10, 0, 2, 4], [0, 2, 4, 5, 7, 9, 10], [7, 9, 11, 0, 2, 4, 5]
-    ],
-    [ # Jazz II-V-I
-        [2, 4, 5, 7, 9, 10, 0], [7, 9, 11, 0, 2, 4, 5], [0, 2, 4, 5, 7, 9, 11], [0, 2, 4, 5, 7, 9, 11]
-    ]
+    [[0, 2, 4, 5, 7, 9, 11], [9, 11, 0, 2, 4, 5, 7], [7, 9, 11, 0, 2, 4, 5], [2, 4, 5, 7, 9, 10, 0]], # House
+    [[0, 2, 4, 5, 7, 9, 10], [5, 7, 9, 10, 0, 2, 4], [0, 2, 4, 5, 7, 9, 10], [7, 9, 11, 0, 2, 4, 5]], # Blues
+    [[2, 4, 5, 7, 9, 10, 0], [7, 9, 11, 0, 2, 4, 5], [0, 2, 4, 5, 7, 9, 11], [0, 2, 4, 5, 7, 9, 11]], # Jazz II-V-I
+    [[4, 6, 7, 9, 11, 1, 2], [4, 6, 7, 9, 11, 1, 2], [9, 11, 1, 2, 4, 6, 7], [9, 11, 1, 2, 4, 6, 7]], # Funk (Em7, A7)
+    [[0, 2, 4, 5, 7, 9, 11], [7, 9, 11, 0, 2, 4, 5], [9, 11, 0, 2, 4, 5, 7], [5, 7, 9, 11, 0, 2, 4]], # Pop (C, G, Am, F)
+    [[0, 2, 3, 5, 7, 8, 10], [5, 7, 8, 10, 0, 2, 3], [0, 2, 3, 5, 7, 8, 10], [7, 8, 10, 0, 2, 3, 5]], # Minor Blues
+    [[2, 4, 6, 7, 9, 11, 1], [9, 11, 1, 2, 4, 6, 7], [4, 6, 8, 9, 11, 1, 3], [7, 9, 11, 0, 2, 4, 6]]  # Rock (D, A, E, G)
 ]
 
 def freq_to_midi(f_str):
@@ -33,12 +31,9 @@ def get_musicality_score(freq_strs, progression_idx):
         m, t = freq_to_midi(f)
         midis.append(m)
         ties.append(t)
-
     num_steps = len(midis)
     chord_tones = 0
     total_played = 0
-    valid_ties = 0
-
     for i, midi in enumerate(midis):
         if midi is not None:
             total_played += 1
@@ -46,23 +41,14 @@ def get_musicality_score(freq_strs, progression_idx):
             chord_idx = i // (num_steps // 4)
             if note in PROGRESSIONS[progression_idx][chord_idx]:
                 chord_tones += 1
-            if ties[i]:
-                valid_ties += 1
-
     accuracy = chord_tones/total_played if total_played > 0 else 0
-    tie_ratio = valid_ties/total_played if total_played > 0 else 0
-    return accuracy, tie_ratio
+    return accuracy
 
 if __name__ == "__main__":
-    prog_idx = 0
-    if len(sys.argv) > 1: prog_idx = int(sys.argv[1])
-
-    print(f"Tracking Convergence and User Bias for Progression {prog_idx}...")
-    print(f"{'Likes':<6} | {'Iters':<6} | {'Accuracy':<10} | {'Tie Ratio':<10}")
-    print("-" * 45)
-    for likes in [0, 2, 5]:
-        for iters in [10, 100, 500]:
-            freqs = run_mock(iters, prog_idx, likes)
-            if freqs:
-                acc, ties = get_musicality_score(freqs, prog_idx)
-                print(f"{likes:<6} | {iters:<6} | {acc:<10.2%} | {ties:<10.2%}")
+    print(f"{'Prog':<5} | {'Likes':<6} | {'Accuracy'}")
+    print("-" * 30)
+    for p in range(7):
+        freqs = run_mock(200, p, 2)
+        if freqs:
+            acc = get_musicality_score(freqs, p)
+            print(f"{p:<5} | {2:<6} | {acc:.2%}")
