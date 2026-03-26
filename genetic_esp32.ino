@@ -2,17 +2,15 @@
 // BPM_PIN controls BPM (analog)
 // Bassline is generated for 64 steps
 // GPIO25 outputs 8-bit audio signal using DAC
-// Bassline generator algorithm uses jazz music theory convergence table
-// Evolutionary algorithm converges based on user "like" and "dislike" buttons
 
 #include <Arduino.h>
 #include <driver/dac.h>
 #include <cmath>
 
-#define BEAT_PIN 2 // digital pin for beat trigger signal
-#define LIKE_PIN 4 // digital pin for like button
-#define DISLIKE_PIN 5 // digital pin for dislike button
-#define BPM_PIN 36 // analog pin for BPM control (VP)
+#define BEAT_PIN 2
+#define LIKE_PIN 4
+#define DISLIKE_PIN 5
+#define BPM_PIN 36
 
 const int NUM_STEPS = 64;
 const int NUM_NOTES = 12;
@@ -27,18 +25,26 @@ struct Genome {
 };
 
 const int JAZZ_TABLE[7][12] = {
-    {10, -5, 2, -5, 8, 5, -5, 10, -5, 5, -5, 8}, // Major
-    {10, -5, 5, 10, -5, 5, -5, 10, -5, 2, 8, -5}, // Minor
-    {10, -5, 2, -5, 8, 5, -5, 10, -5, 5, 8, -5}, // Dominant
-    {10, -5, -5, 10, -5, -5, 10, -5, -5, 10, -5, -5}, // Diminished
-    {10, -5, -5, 10, -5, -5, 8, -5, -5, 2, 8, -5}, // Half-dim
-    {10, -5, -5, -5, 10, -5, -5, 8, -5, -5, -5, -5}, // Augmented
-    {10, -5, -5, -5, -5, 10, 8, 10, -5, -5, -5, 8}  // Suspended
+    {10, -5, 2, -5, 8, 5, -5, 10, -5, 5, -5, 8},
+    {10, -5, 5, 10, -5, 5, -5, 10, -5, 2, 8, -5},
+    {10, -5, 2, -5, 8, 5, -5, 10, -5, 5, 8, -5},
+    {10, -5, -5, 10, -5, -5, 10, -5, -5, 10, -5, -5},
+    {10, -5, -5, 10, -5, -5, 8, -5, -5, 2, 8, -5},
+    {10, -5, -5, -5, 10, -5, -5, 8, -5, -5, -5, -5},
+    {10, -5, -5, -5, -5, 10, 8, 10, -5, -5, -5, 8}
 };
 
 const byte CHORD_PROGRESSION[4][2] = {
   {0,0}, {1,9}, {2,7}, {1,2}
 };
+
+int freq_lut[128];
+byte sine_lut[256];
+
+void initLUTs() {
+  for (int i = 0; i < 128; i++) freq_lut[i] = (int)(440.0 * pow(2.0, (i - 69) / 12.0));
+  for (int i = 0; i < 256; i++) sine_lut[i] = (byte)(128 + 127 * sin(i * 2.0 * M_PI / 256.0));
+}
 
 Genome population[POP_SIZE];
 Genome best_genome;
@@ -48,45 +54,50 @@ unsigned long step_time;
 unsigned long last_time;
 bool beat_on = false;
 
+int note_bias[NUM_NOTES] = {0};
+int octave_bias[3] = {0};
+
 // Audio variables
-volatile float phase = 0;
-volatile float phase_inc = 0;
-volatile int current_sample = 128;
+volatile uint32_t phase = 0;
+volatile uint32_t phase_inc = 0;
 volatile byte current_waveform = 1;
+volatile uint16_t amplitude = 0; // 0-255 (fixed point 8.8)
+volatile uint16_t decay_rate = 50; // amount to subtract per sample
 
 hw_timer_t * timer = NULL;
 const int SAMPLE_RATE = 20000;
 
 void IRAM_ATTR onTimer() {
-  if (phase_inc > 0) {
+  if (amplitude > 0) {
     phase += phase_inc;
-    if (phase >= 1.0) phase -= 1.0;
-
+    byte idx = (phase >> 24) & 0xFF;
+    int raw_sample = 0;
     switch(current_waveform) {
-      case 0: // Sine
-        current_sample = (int)(128 + 127 * sin(phase * 2.0 * M_PI));
-        break;
-      case 1: // Saw
-        current_sample = (int)(phase * 255);
-        break;
-      case 2: // Triangle
-        current_sample = (int)(phase < 0.5 ? phase * 510 : (1.0 - phase) * 510);
-        break;
-      case 3: // Square
-        current_sample = (phase < 0.5 ? 255 : 0);
-        break;
-      default:
-        current_sample = (int)(phase * 255);
-        break;
+      case 0: raw_sample = (int)sine_lut[idx] - 128; break;
+      case 1: raw_sample = (int)idx - 128; break;
+      case 2: raw_sample = (int)(idx < 128 ? idx * 2 : (255 - idx) * 2) - 128; break;
+      case 3: raw_sample = (idx < 128 ? 127 : -128); break;
     }
-    dac_output_voltage(DAC_CHANNEL_1, (byte)current_sample); // GPIO25
+    // Corrected fixed-point scaling: (raw_sample * amp_val) >> 8
+    int amp_val = amplitude >> 8;
+    int out = 128 + ((raw_sample * amp_val) >> 8);
+    dac_output_voltage(DAC_CHANNEL_1, (byte)out);
+
+    if (amplitude > decay_rate) amplitude -= decay_rate;
+    else {
+      amplitude = 0;
+      phase_inc = 0;
+    }
   } else {
-    dac_output_voltage(DAC_CHANNEL_1, 0);
+    dac_output_voltage(DAC_CHANNEL_1, 128);
+    phase_inc = 0;
   }
 }
 
 int mtof(byte note, byte octave) {
-  return (int)(440.0 * pow(2.0, (note + octave * 12 + 24 - 69) / 12.0));
+  int midi = note + octave * 12 + 24;
+  if (midi > 127) midi = 127;
+  return freq_lut[midi];
 }
 
 int evaluateGenome(const Genome& genome) {
@@ -97,9 +108,10 @@ int evaluateGenome(const Genome& genome) {
     byte chord_type = CHORD_PROGRESSION[i / (NUM_STEPS / 4)][0];
     byte chord_root = CHORD_PROGRESSION[i / (NUM_STEPS / 4)][1];
     byte scale_degree = (note - chord_root + NUM_NOTES) % NUM_NOTES;
-
     score += JAZZ_TABLE[chord_type][scale_degree];
     score -= abs(octave - 1) * 10;
+    score += note_bias[note] * 5;
+    score += octave_bias[octave] * 5;
     if (i % 4 == 0) {
         if (note == chord_root) score += 20;
         if (genome.gate[i] == 0) score -= 10;
@@ -107,9 +119,6 @@ int evaluateGenome(const Genome& genome) {
     if (i > 0) {
       int interval = (note + octave * 12) - (genome.note[i-1] + genome.octave[i-1] * 12);
       score -= abs(interval) * 3;
-      if (interval == 0 && genome.gate[i] == 1 && genome.gate[i-1] == 1) {
-        score -= 15;
-      }
     }
   }
   return score;
@@ -139,9 +148,10 @@ void initPopulation() {
   }
 }
 
+// next_gen declared globally (on heap/data segment) to avoid stack overflow
+Genome next_gen[POP_SIZE];
+
 void mutatePopulation() {
-  // Elitism: keep best_genome in the next population
-  Genome next_gen[POP_SIZE];
   next_gen[0] = best_genome;
   for (int i = 1; i < POP_SIZE; i++) {
     Genome child;
@@ -151,7 +161,6 @@ void mutatePopulation() {
       child.octave[j] = (random(100) < 50) ? best_genome.octave[j] : parent2.octave[j];
       child.gate[j] = (random(100) < 50) ? best_genome.gate[j] : parent2.gate[j];
       child.waveform[j] = best_genome.waveform[j];
-
       if ((float)random(100)/100.0 < MUT_RATE) child.note[j] = random(NUM_NOTES);
       if ((float)random(100)/100.0 < MUT_RATE) child.octave[j] = random(3);
       if ((float)random(100)/100.0 < MUT_RATE) child.gate[j] = (random(10) < 7) ? 1 : 0;
@@ -161,32 +170,36 @@ void mutatePopulation() {
   for(int i=0; i<POP_SIZE; i++) population[i] = next_gen[i];
 }
 
+void updateBias() {
+  for(int i=0; i<NUM_STEPS; i++) {
+    if (best_genome.gate[i]) {
+      note_bias[best_genome.note[i]]++;
+      octave_bias[best_genome.octave[i]]++;
+    }
+  }
+}
+
 void playStep() {
   byte note = best_genome.note[current_step];
   byte octave = best_genome.octave[current_step];
   byte gate = best_genome.gate[current_step];
   byte waveform = best_genome.waveform[current_step];
-
   int freq = mtof(note, octave);
-
   if (gate == 1) {
     current_waveform = waveform;
-    phase_inc = (float)freq / SAMPLE_RATE;
-  } else {
-    phase_inc = 0;
+    phase_inc = (uint32_t)(((double)freq / SAMPLE_RATE) * 4294967296.0);
+    amplitude = 65535; // Max amplitude (255.255)
   }
-
-  // Output frequency to serial for analysis
   Serial.print(gate ? freq : 0);
   Serial.print(current_step == NUM_STEPS - 1 ? "\n" : " ");
 }
 
 void setup() {
   Serial.begin(115200);
+  initLUTs();
   pinMode(BEAT_PIN, OUTPUT);
   pinMode(LIKE_PIN, INPUT_PULLUP);
   pinMode(DISLIKE_PIN, INPUT_PULLUP);
-
   dac_enable_voltage_output(DAC_CHANNEL_1);
 
   timer = timerBegin(0, 80, true);
@@ -196,7 +209,6 @@ void setup() {
 
   initPopulation();
   evaluatePopulation();
-
   current_bpm = analogRead(BPM_PIN) / 16 + 60;
   step_time = 60000 / current_bpm / 4;
   last_time = millis();
@@ -204,26 +216,27 @@ void setup() {
 
 void loop() {
   unsigned long current_time = millis();
-
   if (current_time - last_time >= step_time) {
     last_time = current_time;
     playStep();
     current_step++;
-
     if (current_step == NUM_STEPS) {
       current_step = 0;
       if (digitalRead(LIKE_PIN) == LOW) {
+        updateBias();
         mutatePopulation();
         evaluatePopulation();
       } else if (digitalRead(DISLIKE_PIN) == LOW) {
         initPopulation();
+        for(int i=0; i<NUM_NOTES; i++) note_bias[i] = 0;
+        for(int i=0; i<3; i++) octave_bias[i] = 0;
         evaluatePopulation();
       }
     }
-
     beat_on = !beat_on;
     digitalWrite(BEAT_PIN, beat_on ? HIGH : LOW);
     current_bpm = analogRead(BPM_PIN) / 16 + 60;
     step_time = 60000 / current_bpm / 4;
+    decay_rate = 65535 / (SAMPLE_RATE * step_time / 1000);
   }
 }
