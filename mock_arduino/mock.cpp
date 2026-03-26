@@ -31,23 +31,21 @@ const int JAZZ_TABLE[7][12] = {
     {10, -5, -5, -5, -5, 10, 8, 10, -5, -5, -5, 8}
 };
 
-enum Progression { HOUSE, BLUES, JAZZ_II_V_I, FUNK, POP, MINOR_BLUES, ROCK };
+enum Progression {
+  HOUSE, BLUES, JAZZ_II_V_I, FUNK, POP, MINOR_BLUES, ROCK,
+  TECHNO, PSYTRANCE, TRAP, REGGAE, BOSSA_NOVA, SYNTHWAVE, DISCO, METAL, AMBIENT
+};
 Progression current_prog = HOUSE;
 
-const byte PROGRESSIONS[7][4][2] = {
-  {{0,0}, {1,9}, {2,7}, {1,2}},
-  {{2,0}, {2,5}, {2,0}, {2,7}},
-  {{1,2}, {2,7}, {0,0}, {0,0}},
-  {{1,4}, {1,4}, {2,9}, {2,9}},
-  {{0,0}, {0,7}, {1,9}, {0,5}},
-  {{1,0}, {1,5}, {1,0}, {1,7}},
-  {{0,2}, {0,0}, {0,7}, {0,5}}
+const byte PROGRESSIONS[16][4][2] = {
+  {{0,0}, {1,9}, {2,7}, {1,2}}, {{2,0}, {2,5}, {2,0}, {2,7}}, {{1,2}, {2,7}, {0,0}, {0,0}}, {{1,4}, {1,4}, {2,9}, {2,9}},
+  {{0,0}, {0,7}, {1,9}, {0,5}}, {{1,0}, {1,5}, {1,0}, {1,7}}, {{0,2}, {0,0}, {0,7}, {0,5}}, {{1,9}, {1,9}, {1,9}, {1,9}},
+  {{1,2}, {1,2}, {1,2}, {1,2}}, {{1,0}, {1,1}, {1,0}, {1,1}}, {{1,7}, {0,5}, {1,7}, {2,2}}, {{0,0}, {2,7}, {1,2}, {2,7}},
+  {{1,4}, {1,0}, {0,7}, {0,5}}, {{1,9}, {0,5}, {0,0}, {0,7}}, {{1,4}, {1,5}, {1,4}, {1,1}}, {{0,0}, {0,5}, {0,10}, {0,5}}
 };
 
 int freq_lut[128];
-void initFreqLUT() {
-    for (int i = 0; i < 128; i++) freq_lut[i] = (int)(440.0 * pow(2.0, (i - 69) / 12.0));
-}
+void initFreqLUT() { for (int i = 0; i < 128; i++) freq_lut[i] = (int)(440.0 * pow(2.0, (i - 69) / 12.0)); }
 
 Genome population[POP_SIZE];
 Genome next_gen[POP_SIZE];
@@ -56,31 +54,7 @@ int best_score;
 int note_bias[NUM_NOTES] = {0};
 int octave_bias[3] = {0};
 
-void saveState(const std::string& filename) {
-    std::ofstream f(filename, std::ios::binary);
-    if (!f) return;
-    f.write((char*)&best_genome, sizeof(best_genome));
-    f.write((char*)note_bias, sizeof(note_bias));
-    f.write((char*)octave_bias, sizeof(octave_bias));
-    f.write((char*)&current_prog, sizeof(current_prog));
-    f.close();
-}
-
-void loadState(const std::string& filename) {
-    std::ifstream f(filename, std::ios::binary);
-    if (!f) return;
-    f.read((char*)&best_genome, sizeof(best_genome));
-    f.read((char*)note_bias, sizeof(note_bias));
-    f.read((char*)octave_bias, sizeof(octave_bias));
-    f.read((char*)&current_prog, sizeof(current_prog));
-    f.close();
-    population[0] = best_genome;
-}
-
-int mtof(byte note, byte octave) {
-    int midi = note + octave * 12 + 24;
-    return (midi >= 0 && midi < 128) ? freq_lut[midi] : 0;
-}
+int mtof(byte note, byte octave) { int midi = note + octave * 12 + 24; return (midi >= 0 && midi < 128) ? freq_lut[midi] : 0; }
 
 int evaluateGenome(const Genome& genome) {
     int score = 0;
@@ -94,8 +68,10 @@ int evaluateGenome(const Genome& genome) {
         score += octave_bias[genome.octave[i]] * 5;
         if (i % 4 == 0) {
             if (genome.note[i] == chord_root) score += 20;
-            if (genome.gate[i] == 0) score -= 10;
+            if (genome.gate[i] == 0) score -= 15;
+            if ((current_prog == TECHNO || current_prog == PSYTRANCE) && genome.gate[i] == 1) score += 10;
         }
+        if (current_prog == REGGAE) { if (i % 4 == 0) score -= 20; if (i % 4 == 2 && genome.gate[i]) score += 25; }
         if (i > 0) {
             int interval = (genome.note[i] + genome.octave[i] * 12) - (genome.note[i-1] + genome.octave[i-1] * 12);
             score -= abs(interval) * 3;
@@ -130,8 +106,7 @@ void initPopulation() {
 void mutatePopulation(float rate = 0.05) {
     next_gen[0] = best_genome;
     for (int i = 1; i < POP_SIZE; i++) {
-        Genome parent1 = best_genome;
-        Genome parent2 = population[rand() % POP_SIZE];
+        Genome parent1 = best_genome, parent2 = population[rand() % POP_SIZE];
         int p1 = rand() % NUM_STEPS, p2 = rand() % NUM_STEPS;
         if (p1 > p2) std::swap(p1, p2);
         for(int j=0; j<NUM_STEPS; j++) {
@@ -152,33 +127,19 @@ void mutatePopulation(float rate = 0.05) {
     for(int i=0; i<POP_SIZE; i++) population[i] = next_gen[i];
 }
 
-void updateBias() {
-    for(int i=0; i<NUM_STEPS; i++) if (best_genome.gate[i]) { note_bias[best_genome.note[i]]++; octave_bias[best_genome.octave[i]]++; }
-}
-
 int main(int argc, char** argv) {
-    srand(time(NULL));
-    initFreqLUT();
-    std::string filename = "mock_state.bin";
-
-    // Command parsing (save, load, reset, prog [0-6], like [n], iters [n])
-    initPopulation();
-    evaluatePopulation();
-
+    srand(time(NULL)); initFreqLUT();
+    initPopulation(); evaluatePopulation();
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "save") saveState(filename);
-        else if (arg == "load") { loadState(filename); evaluatePopulation(); }
-        else if (arg == "reset") { initPopulation(); for(int b=0; b<NUM_NOTES; b++) note_bias[b]=0; for(int b=0; b<3; b++) octave_bias[b]=0; evaluatePopulation(); }
-        else if (arg == "prog") { if (i+1 < argc) current_prog = (Progression)(atoi(argv[++i]) % 7); initPopulation(); evaluatePopulation(); }
-        else if (arg == "like") { if (i+1 < argc) { int lcount = atoi(argv[++i]); for(int l=0; l<lcount; l++) { updateBias(); mutatePopulation(0.15); evaluatePopulation(); } } }
-        else if (arg == "iters") { if (i+1 < argc) { int icount = atoi(argv[++i]); for(int it=0; it<icount; it++) { mutatePopulation(); evaluatePopulation(); } } }
+        if (arg == "prog") { if (i+1 < argc) current_prog = (Progression)(atoi(argv[++i]) % 16); initPopulation(); evaluatePopulation(); }
+        else if (arg == "iters") { if (i+1 < argc) { int ic = atoi(argv[++i]); for(int it=0; it<ic; it++) { mutatePopulation(); evaluatePopulation(); } } }
     }
-
     for (int i = 0; i < NUM_STEPS; i++) {
         if (best_genome.gate[i]) {
             int f = mtof(best_genome.note[i], best_genome.octave[i]);
-            if (i > 0 && best_genome.tie[i-1] == 1 && best_genome.note[i] == best_genome.note[i-1] && best_genome.octave[i] == best_genome.octave[i-1]) std::cout << "T" << f << " ";
+            int prev = (i == 0) ? NUM_STEPS - 1 : i - 1;
+            if (best_genome.tie[prev] == 1 && best_genome.note[i] == best_genome.note[prev] && best_genome.octave[i] == best_genome.octave[prev]) std::cout << "T" << f << " ";
             else std::cout << f << " ";
         } else std::cout << 0 << " ";
     }
