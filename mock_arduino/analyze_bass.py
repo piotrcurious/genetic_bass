@@ -22,11 +22,8 @@ def freq_to_midi(f_str):
     return round(12 * math.log2(f_val / 440.0) + 69), is_tie, is_slide
 
 def run_mock(iterations=500, scale=0, root=0):
-    # Note: mock.cpp main currently doesn't use these specific args in the latest version I wrote
-    # but it defaults to a 4-chord sequence. Let's assume we might want to pass them or
-    # just analyze what it outputs.
-    # Actually, the last mock.cpp I wrote has a hardcoded sequence.
-    result = subprocess.run(['./mock_arduino/mock'], capture_output=True, text=True)
+    # Pass iters to the mock binary
+    result = subprocess.run(['./mock_arduino/mock', 'iters', str(iterations)], capture_output=True, text=True)
     if result.returncode != 0: return None
     return result.stdout.strip().split()
 
