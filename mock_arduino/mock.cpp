@@ -54,6 +54,15 @@ int main(int argc, char** argv) {
     initPopulation();
     evaluatePopulation();
 
+    // Set some defaults for testing the new fitness rules
+    h_state.syncopation_bias = 0.8;
+    h_state.groove_density = 0.7;
+    h_state.sequence_len = 4;
+    h_state.sequence[0] = {0, 0}; // C
+    h_state.sequence[1] = {5, 0}; // F
+    h_state.sequence[2] = {0, 0}; // C
+    h_state.sequence[3] = {7, 0}; // G
+
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "iters") {

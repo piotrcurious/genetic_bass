@@ -21,8 +21,7 @@ def freq_to_midi(f_str):
     if f_val <= 0: return None, is_tie, is_slide
     return round(12 * math.log2(f_val / 440.0) + 69), is_tie, is_slide
 
-def run_mock(iterations=500, scale=0, root=0):
-    # Pass iters to the mock binary
+def run_mock(iterations=500):
     result = subprocess.run(['./mock_arduino/mock', 'iters', str(iterations)], capture_output=True, text=True)
     if result.returncode != 0: return None
     return result.stdout.strip().split()
@@ -34,6 +33,8 @@ def analyze_output(freq_strs, expected_sequence):
     unique_steps = set()
     slides = 0
     ties = 0
+    off_beat_notes = 0
+    repeats = 0
 
     for i, f_str in enumerate(freq_strs):
         midi, tie, slide = freq_to_midi(f_str)
@@ -42,8 +43,9 @@ def analyze_output(freq_strs, expected_sequence):
 
         if midi is not None:
             total_played += 1
+            if i % 2 == 1: off_beat_notes += 1
+
             note = midi % 12
-            # Assuming mock uses 4 chords mapped to 64 steps
             chord_idx = (i * len(expected_sequence)) // num_steps
             root, scale_idx = expected_sequence[chord_idx]
             mask = SCALES[scale_idx][1]
@@ -51,24 +53,41 @@ def analyze_output(freq_strs, expected_sequence):
             if (mask >> rel) & 1: in_scale += 1
             unique_steps.add(f_str)
 
+    # Check for 16-step functional repeats
+    for b in range(num_steps // 16 - 1):
+        ci_b = (b * 16 * len(expected_sequence)) // num_steps
+        root_b = expected_sequence[ci_b][0]
+        for b2 in range(b + 1, num_steps // 16):
+            ci_b2 = (b2 * 16 * len(expected_sequence)) // num_steps
+            root_b2 = expected_sequence[ci_b2][0]
+
+            matches = 0
+            for s in range(16):
+                m_b, t_b, s_b = freq_to_midi(freq_strs[b*16+s])
+                m_b2, t_b2, s_b2 = freq_to_midi(freq_strs[b2*16+s])
+
+                if m_b is None and m_b2 is None:
+                    matches += 1
+                elif m_b is not None and m_b2 is not None:
+                    if (m_b - root_b) % 12 == (m_b2 - root_b2) % 12:
+                        matches += 1
+            if matches >= 10:
+                repeats += 1
+
     accuracy = (in_scale / total_played) * 100 if total_played > 0 else 0
+    syncopation = (off_beat_notes / total_played) * 100 if total_played > 0 else 0
     diversity = (len(unique_steps) / num_steps) * 100
-    return accuracy, diversity, slides, ties, total_played
+
+    return accuracy, diversity, syncopation, repeats, slides, ties, total_played
 
 if __name__ == "__main__":
-    # The current mock.cpp has this sequence hardcoded:
-    # h_state.sequence[0] = {0, 0}; h_state.sequence[1] = {5, 0};
-    # h_state.sequence[2] = {7, 2}; h_state.sequence[3] = {0, 0};
-    # (C Major, F Major, G Dorian, C Major)
-    current_mock_sequence = [(0, 0), (5, 0), (7, 2), (0, 0)]
+    current_mock_sequence = [(0, 0), (5, 0), (0, 0), (7, 0)]
 
-    print(f"{'Test Run':<15} | {'Acc%':<6} | {'Div%':<6} | {'Slds':<4} | {'Ties':<4} | {'Notes'}")
-    print("-" * 60)
+    print(f"{'Run':<4} | {'Acc%':<5} | {'Div%':<5} | {'Sync%':<5} | {'Rpt':<3} | {'Sld':<3} | {'Tie':<3} | {'Notes'}")
+    print("-" * 65)
 
-    for run in range(5):
-        freqs = run_mock()
+    for run in range(10):
+        freqs = run_mock(5000)
         if freqs:
-            acc, div, sld, tie, n = analyze_output(freqs, current_mock_sequence)
-            print(f"Iteration {run+1:<6} | {acc:<6.1f} | {div:<6.1f} | {sld:<4} | {tie:<4} | {n}")
-
-    print("\nAdherence verified against hardcoded sequence (C Maj, F Maj, G Dorian, C Maj)")
+            acc, div, sync, rpt, sld, tie, n = analyze_output(freqs, current_mock_sequence)
+            print(f"{run+1:<4} | {acc:<5.1f} | {div:<5.1f} | {sync:<5.1f} | {rpt:<3} | {sld:<3} | {tie:<3} | {n}")
